@@ -4,6 +4,7 @@ import FS from 'fs';
 import he from 'he';
 import * as process from 'process';
 import URI from 'urijs';
+import sharp from 'sharp';
 
 import { BskyAgent, RichText } from '@atproto/api';
 
@@ -35,20 +36,30 @@ if (process.env.MAX_DATE != null && process.env.MAX_DATE.length > 0)
 
 async function resolveShorURL(url: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-        if( url.startsWith('https') ) {
-            https.get(url, response => {
-                resolve(response.responseUrl);
-            }).on('error', err => {
-                console.warn(`Error parsing url ${url}`);
-                resolve(url);
-            });
-        } else  {
-            http.get(url, response => {
-                resolve(response.responseUrl);
-            }).on('error', err => {
-                console.warn(`Error parsing url ${url}`);
-                resolve(url);
-            });
+        try {
+            const timeout = setTimeout(() => {
+            console.warn(`Timeout resolving url ${url}`);
+            resolve(url);
+        }, 10000);
+
+        const handleResponse = (response) => {
+            clearTimeout(timeout);
+            resolve(response.responseUrl);
+        };
+
+        const handleError = (err) => {
+            clearTimeout(timeout);
+            console.warn(`Error parsing url ${url}`);
+            resolve(url);
+        };
+
+        if (url.startsWith('https')) {
+            https.get(url, handleResponse).on('error', handleError);
+        } else {
+            http.get(url, handleResponse).on('error', handleError);
+        }
+        } catch (error) {
+            resolve(url);
         }
     });
 }
@@ -146,6 +157,25 @@ function getTweets(){
     return tweets;
 }
 
+async function resizeImageIfNeeded(imageBuffer: Buffer, maxSizeKB = 976): Promise<Buffer> {
+    if (imageBuffer.length > maxSizeKB * 1024) {
+        console.log(`Image size ${(imageBuffer.length/1024/1024).toFixed(2)}MB exceeds ${maxSizeKB}KB, resizing...`);
+        
+        const image = sharp(imageBuffer);
+        const metadata = await image.metadata();
+        
+        // Calculate new dimensions maintaining aspect ratio
+        const scale = Math.sqrt((maxSizeKB * 1024) / imageBuffer.length);
+        const newWidth = Math.floor(metadata.width! * scale);
+        const newHeight = Math.floor(metadata.height! * scale);
+        
+        return await image
+            .resize(newWidth, newHeight)
+            .jpeg({ quality: 80 })
+            .toBuffer();
+    }
+    return imageBuffer;
+}
 
 async function main() {
     console.log(`Import started at ${new Date().toISOString()}`)
@@ -236,7 +266,8 @@ async function main() {
                             const imageBuffer = FS.readFileSync(mediaFilename);
 
                             if (!SIMULATE) {
-                                const blobRecord = await agent.uploadBlob(imageBuffer, {
+                                const resizedBuffer = await resizeImageIfNeeded(imageBuffer);
+                                const blobRecord = await agent.uploadBlob(resizedBuffer, {
                                     encoding: mimeType
                                 });
 
